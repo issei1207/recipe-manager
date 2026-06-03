@@ -130,6 +130,15 @@ main { flex:1; padding:16px; }
 .photo-url-btn { padding:10px 12px; background:var(--brown); color:white; border:none; border-radius:10px; cursor:pointer; font-size:0.75rem; font-family:inherit; font-weight:700; white-space:nowrap; }
 .or-divider { color:var(--gray); font-size:0.72rem; margin:8px 0; }
 
+
+/* IMPORT MODE TABS */
+.import-mode-btn {
+  flex:1; padding:7px; border-radius:8px; font-size:0.75rem;
+  font-family:inherit; font-weight:700; cursor:pointer;
+  border:1.5px solid var(--warm); background:white; color:var(--gray);
+  transition:all 0.2s;
+}
+.import-mode-btn.active { background:var(--caramel); color:white; border-color:var(--caramel); }
 /* URL IMPORT */
 .url-import-box { background:linear-gradient(135deg,#fff8f2,#fdf0e4); border:2px dashed var(--caramel); border-radius:14px; padding:18px; margin-bottom:16px; }
 .url-import-title { font-size:0.78rem; color:var(--caramel); font-weight:700; margin-bottom:10px; }
@@ -775,45 +784,61 @@ async function deleteRecipe(id) {
   showLoading(false);
 }
 
-// ========== URL IMPORT ==========
-async function importFromUrl() {
-  const url=document.getElementById('f-url').value.trim();
-  if (!url||!url.startsWith('http')) { showUrlStatus('error','⚠️ 正しいURLを入力してください'); return; }
-  const btn=document.getElementById('urlFetchBtn');
-  btn.disabled=true; btn.textContent='読み取り中...';
+// ========== IMPORT MODE ==========
+function switchImportMode(mode) {
+  document.getElementById('importModeUrl').style.display = mode==='url' ? '' : 'none';
+  document.getElementById('importModePaste').style.display = mode==='paste' ? '' : 'none';
+  document.getElementById('modeUrl').classList.toggle('active', mode==='url');
+  document.getElementById('modePaste').classList.toggle('active', mode==='paste');
+  document.getElementById('urlStatus').className = 'url-status';
+}
+
+async function importFromPaste() {
+  const text = document.getElementById('f-pasteText').value.trim();
+  if (!text || text.length < 30) { showUrlStatus('error','⚠️ テキストが短すぎます。レシピのテキストをもっと貼り付けてください'); return; }
+  const btn = document.getElementById('pasteFetchBtn');
+  btn.disabled=true; btn.textContent='解析中...';
   showUrlStatus('','⏳ AIがレシピを解析中...');
-  try {
-    const response = await fetch('https://api.anthropic.com/v1/messages',{
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        model:'claude-sonnet-4-20250514', max_tokens:2500,
-        tools:[{type:'web_search_20250305',name:'web_search'}],
-        messages:[{role:'user',content:`以下のURLのレシピページを読み取り、JSON形式のみで返してください。
 
-URL: ${url}
+  const prompt = `以下のテキストはレシピページからコピーしたものです。レシピ情報を抽出してJSON形式のみで返してください。説明文不要。
 
-JSON形式（これのみ、説明不要）:
+テキスト:
+${text.slice(0, 4000)}
+
+返すJSONの形式:
 {
   "name": "レシピ名",
   "category": "スイーツ/パン・生地/和食/洋食/中華/麺類/その他",
   "time": "調理時間",
-  "ingredients": "材料1 分量1\\n材料2 分量2",
+  "ingredients": "材料1 分量1\n材料2 分量2",
   "torontoIngredients": [
     {"jp": "材料名（日本語）", "en": "Toronto store product name & brand", "store": "No Frills/Sobeys etc. + コーナー名"}
   ],
-  "steps": "1. 手順\\n2. 手順",
+  "steps": "1. 手順\n2. 手順",
   "note": "ポイント",
   "tags": ["タグ1","タグ2"],
   "emoji": "絵文字1文字",
-  "photoUrl": "ページ内の料理写真URLがあれば記載、なければ空文字"
-}`}]
+  "photoUrl": ""
+}`;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        model:'claude-sonnet-4-20250514',
+        max_tokens:2500,
+        messages:[{role:'user', content:prompt}]
       })
     });
-    const data=await response.json();
-    const text=(data.content||[]).filter(c=>c.type==='text').map(c=>c.text).join('');
-    const m=text.match(/\{[\s\S]*\}/);
-    if (!m) throw new Error('JSON not found');
-    const recipe=JSON.parse(m[0]);
+    if (!res.ok) throw new Error('API Error: ' + res.status);
+    const data = await res.json();
+    const fullText = (data.content||[]).filter(c=>c.type==='text').map(c=>c.text).join('');
+    const m = fullText.match(/\{[\s\S]*\}/);
+    if (!m) throw new Error('JSONが見つかりません');
+    const recipe = JSON.parse(m[0]);
+    if (!recipe.name) throw new Error('レシピ名が取得できませんでした');
+
     if (recipe.name) document.getElementById('f-name').value=recipe.name;
     if (recipe.category) document.getElementById('f-category').value=recipe.category;
     if (recipe.time) document.getElementById('f-time').value=recipe.time;
@@ -822,12 +847,114 @@ JSON形式（これのみ、説明不要）:
     if (recipe.note) document.getElementById('f-note').value=recipe.note;
     if (recipe.tags) { currentTags=recipe.tags; renderTagList(); }
     if (recipe.emoji) { selectedEmoji=recipe.emoji; renderEmojiRow(); }
-    if (recipe.photoUrl) { document.getElementById('f-photoUrl').value=recipe.photoUrl; currentPhotoData=recipe.photoUrl; showPhotoPreview(recipe.photoUrl); }
-    // Store torontoIngredients temporarily
+    window._pendingToronto = recipe.torontoIngredients || [];
+    document.getElementById('f-pasteText').value='';
+    showUrlStatus('success','✅ レシピを読み取りました！内容を確認して保存してね');
+  } catch(e) {
+    console.error(e);
+    showUrlStatus('error','⚠️ 解析に失敗しました: ' + e.message.slice(0,60));
+  }
+  btn.disabled=false; btn.textContent='AIで解析する';
+}
+
+// ========== URL IMPORT ==========
+async function callAIWithRetry(messages, tools, maxRetries=3) {
+  // AIのレスポンスが tool_use の場合、tool_result を返して会話を続ける
+  let msgs = [...messages];
+  for (let attempt=0; attempt<maxRetries; attempt++) {
+    const body = { model:'claude-sonnet-4-20250514', max_tokens:3000, messages:msgs };
+    if (tools) body.tools = tools;
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error('API Error: ' + res.status + ' ' + err);
+    }
+    const data = await res.json();
+    const content = data.content || [];
+
+    // テキストからJSONを探す
+    const textBlocks = content.filter(c=>c.type==='text');
+    const fullText = textBlocks.map(c=>c.text).join('');
+    const jsonMatch = fullText.match(/\{[\s\S]*\}/);
+    if (jsonMatch) return JSON.parse(jsonMatch[0]);
+
+    // tool_use があれば tool_result を返して続ける
+    const toolUses = content.filter(c=>c.type==='tool_use');
+    if (toolUses.length && data.stop_reason==='tool_use') {
+      msgs.push({ role:'assistant', content });
+      msgs.push({
+        role:'user',
+        content: toolUses.map(t=>({
+          type:'tool_result', tool_use_id:t.id,
+          content: '検索結果を受け取りました。レシピ情報をJSONで返してください。'
+        }))
+      });
+      continue;
+    }
+    throw new Error('JSONが見つかりませんでした: ' + fullText.slice(0,200));
+  }
+  throw new Error('最大リトライ回数を超えました');
+}
+
+async function importFromUrl() {
+  const url=document.getElementById('f-url').value.trim();
+  if (!url||!url.startsWith('http')) { showUrlStatus('error','⚠️ 正しいURLを入力してください'); return; }
+  const btn=document.getElementById('urlFetchBtn');
+  btn.disabled=true; btn.textContent='読み取り中...';
+  showUrlStatus('','⏳ AIがレシピを解析中（30秒ほどかかることがあります）...');
+
+  const prompt = `以下のURLのレシピを読み取り、JSON形式のみで返してください。説明文・マークダウン不要。
+
+URL: ${url}
+
+返すJSONの形式:
+{
+  "name": "レシピ名",
+  "category": "スイーツ/パン・生地/和食/洋食/中華/麺類/その他",
+  "time": "調理時間",
+  "ingredients": "材料1 分量1\n材料2 分量2",
+  "torontoIngredients": [
+    {"jp": "材料名（日本語）", "en": "Toronto store product name & brand", "store": "No Frills/Sobeys etc. + コーナー名"}
+  ],
+  "steps": "1. 手順\n2. 手順",
+  "note": "ポイント",
+  "tags": ["タグ1","タグ2"],
+  "emoji": "絵文字1文字",
+  "photoUrl": "料理写真URLがあれば記載、なければ空文字"
+}`;
+
+  try {
+    const recipe = await callAIWithRetry(
+      [{role:'user', content:prompt}],
+      [{type:'web_search_20250305', name:'web_search'}]
+    );
+    if (!recipe.name) throw new Error('レシピ名が取得できませんでした');
+
+    if (recipe.name) document.getElementById('f-name').value=recipe.name;
+    if (recipe.category) document.getElementById('f-category').value=recipe.category;
+    if (recipe.time) document.getElementById('f-time').value=recipe.time;
+    if (recipe.ingredients) document.getElementById('f-ingredients').value=recipe.ingredients;
+    if (recipe.steps) document.getElementById('f-steps').value=recipe.steps;
+    if (recipe.note) document.getElementById('f-note').value=recipe.note;
+    if (recipe.tags) { currentTags=recipe.tags; renderTagList(); }
+    if (recipe.emoji) { selectedEmoji=recipe.emoji; renderEmojiRow(); }
+    if (recipe.photoUrl) {
+      document.getElementById('f-photoUrl').value=recipe.photoUrl;
+      currentPhotoData=recipe.photoUrl;
+      showPhotoPreview(recipe.photoUrl);
+    }
     window._pendingToronto = recipe.torontoIngredients || [];
     showUrlStatus('success','✅ レシピを読み取りました！内容を確認して保存してね');
   } catch(e) {
-    showUrlStatus('error','⚠️ 読み取りに失敗しました。URLを確認するか手動で入力してください');
+    console.error('URL import error:', e);
+    const msg = e.message.includes('API Error') ? '⚠️ APIエラー。しばらくしてから再試行してください' :
+                e.message.includes('JSON') ? '⚠️ レシピの解析に失敗しました。別のURLを試してみてください' :
+                '⚠️ 読み取りに失敗しました: ' + e.message.slice(0,50);
+    showUrlStatus('error', msg);
   }
   btn.disabled=false; btn.textContent='読み取る';
 }
