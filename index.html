@@ -9,6 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="RecipeBook">
 <meta name="theme-color" content="#c8956c">
 <title>My Recipe Book</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <link href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@400;600;700&family=Zen+Maru+Gothic:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -169,6 +170,19 @@ main { flex:1; padding:16px; }
 .cat-chip { padding:5px 14px; border-radius:16px; font-size:0.75rem; border:1.5px solid var(--warm); background:white; color:var(--gray); cursor:pointer; font-family:inherit; transition:all 0.2s; }
 .cat-chip.active { background:var(--caramel); color:white; border-color:var(--caramel); font-weight:700; }
 
+
+/* LOADING */
+#loadingOverlay {
+  position:fixed; inset:0; background:rgba(253,246,236,0.85);
+  z-index:999; display:none; align-items:center; justify-content:center;
+  flex-direction:column; gap:12px;
+}
+.loading-spinner {
+  width:40px; height:40px; border:4px solid var(--warm);
+  border-top-color:var(--caramel); border-radius:50%;
+  animation:spin 0.8s linear infinite;
+}
+.loading-text { font-size:0.85rem; color:var(--caramel); font-weight:700; }
 /* TOAST */
 .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(20px); background:var(--dark); color:white; padding:10px 20px; border-radius:20px; font-size:0.82rem; opacity:0; transition:all 0.3s; z-index:999; white-space:nowrap; }
 .toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
@@ -334,29 +348,90 @@ main { flex:1; padding:16px; }
 <div class="toast" id="toast"></div>
 
 <script>
+// ========== SUPABASE ==========
+const SUPABASE_URL = 'https://eiihdccxzksnlqhtdwha.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVpaWhkY2N4emtzbmxxaHRkd2hhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0NDMxMDcsImV4cCI6MjA5NjAxOTEwN30.zPsrxrr8riBHrcEG41hI5ur-yFOJi0Axg4bya41Z3Zs';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// デバイスID（ユーザー識別用・ログイン不要）
+const USER_ID = localStorage.getItem('userId') || (() => {
+  const id = 'user_' + Math.random().toString(36).slice(2);
+  localStorage.setItem('userId', id);
+  return id;
+})();
+
 // ========== STATE ==========
-let recipes = JSON.parse(localStorage.getItem('recipes2') || '[]');
+let recipes = [];
 let shoppingChecked = JSON.parse(localStorage.getItem('shoppingChecked') || '{}');
 let shoppingRecipes = JSON.parse(localStorage.getItem('shoppingRecipes') || '[]');
 let editingId = null;
 let selectedEmoji = '🍳';
 let currentTags = [];
 let activeCategory = 'すべて';
-let currentPhotoData = ''; // base64 or URL
+let currentPhotoData = '';
 
 const EMOJIS = ['🍰','🥞','🍮','🍩','🍪','🎂','🍜','🍝','🍣','🍱','🥗','🍲','🫕','🥘','🍛','🍕','🥙','🍔','🧆','🥧','🍡','🧁','🫙','🥮','🫐','🍓','🍇','🥑','🥦','🍋'];
 
-// サンプルデータ（初回のみ）
-if (recipes.length === 0) {
-  recipes = [{
-    id: Date.now(),
-    emoji: '🥞',
-    name: 'ミルクレープ',
-    category: 'スイーツ',
-    time: '90分＋冷蔵一晩',
-    photo: '',
+// ========== SUPABASE CRUD ==========
+function toSupabase(data) {
+  return {
+    user_id: USER_ID,
+    emoji: data.emoji || '🍳',
+    name: data.name,
+    category: data.category || 'その他',
+    time: data.time || '',
+    photo: data.photo || '',
+    ingredients: data.ingredients || '',
+    toronto_ingredients: data.torontoIngredients || [],
+    steps: data.steps || '',
+    note: data.note || '',
+    tags: data.tags || [],
+  };
+}
+
+function fromSupabase(row) {
+  return {
+    id: row.id,
+    emoji: row.emoji,
+    name: row.name,
+    category: row.category,
+    time: row.time,
+    photo: row.photo,
+    ingredients: row.ingredients,
+    torontoIngredients: row.toronto_ingredients || [],
+    steps: row.steps,
+    note: row.note,
+    tags: row.tags || [],
+    createdAt: row.created_at ? new Date(row.created_at).toLocaleDateString('ja-JP') : '',
+  };
+}
+
+async function loadRecipes() {
+  showLoading(true);
+  try {
+    const { data, error } = await sb.from('recipes')
+      .select('*')
+      .eq('user_id', USER_ID)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    recipes = (data || []).map(fromSupabase);
+    // 初回：サンプルデータ追加
+    if (recipes.length === 0) await insertSample();
+    renderAll();
+  } catch(e) {
+    console.error(e);
+    showToast('⚠️ データの読み込みに失敗しました');
+  }
+  showLoading(false);
+}
+
+async function insertSample() {
+  const sample = {
+    user_id: USER_ID,
+    emoji: '🥞', name: 'ミルクレープ', category: 'スイーツ',
+    time: '90分＋冷蔵一晩', photo: '',
     ingredients: 'パンケーキミックス 100g\n卵（Large） 3個\n乳糖フリー牛乳 400ml\n乳糖フリー無塩バター 大さじ1/2\n卵黄 2個分\n砂糖 70g\n薄力粉 20g\n乳糖フリー生クリーム35% 200ml\nバニラエクストラクト 小さじ1',
-    torontoIngredients: [
+    toronto_ingredients: [
       { jp: 'パンケーキミックス', en: 'Aunt Jemima Pancake Mix', store: 'No Frills・ベーキングコーナー' },
       { jp: '卵', en: 'Large Eggs (Gray Ridge)', store: 'No Frills・冷蔵コーナー' },
       { jp: '乳糖フリー牛乳', en: 'Lactantia Lactose Free Milk', store: 'No Frills・乳製品コーナー' },
@@ -368,12 +443,17 @@ if (recipes.length === 0) {
     steps: '1. 生地材料を混ぜ、冷蔵庫で30分休ませる\n2. 薄く焼いて16〜18枚のクレープを作る\n3. カスタードクリームを作り急冷する\n4. 生クリームを泡立ててカスタードと合わせる\n5. クレープ→クリームを交互に重ねる\n6. 冷蔵庫で一晩冷やしてカット',
     note: '乳糖不耐症対応・Lactantia Lactose Freeシリーズ使用',
     tags: ['乳糖フリー', 'スイーツ', 'パンケーキミックス', 'トロント'],
-    createdAt: new Date().toLocaleDateString('ja-JP')
-  }];
-  save();
+  };
+  const { data } = await sb.from('recipes').insert(sample).select();
+  if (data) recipes = data.map(fromSupabase);
 }
 
-function save() { localStorage.setItem('recipes2', JSON.stringify(recipes)); }
+function showLoading(on) {
+  document.getElementById('loadingOverlay').style.display = on ? 'flex' : 'none';
+}
+
+// localStorageは使わない（Supabaseがマスター）
+function save() {}
 
 // ========== RENDER ==========
 function renderAll() { renderCategories(); renderRecipes(); renderShopping(); }
@@ -681,10 +761,18 @@ function saveRecipe() {
   }
   save(); closeModal(); renderAll();
 }
-function deleteRecipe(id) {
+async function deleteRecipe(id) {
   if (!confirm('このレシピを削除しますか？')) return;
-  recipes=recipes.filter(r=>r.id!==id);
-  save(); renderAll(); showToast('🗑️ 削除しました');
+  showLoading(true);
+  try {
+    const { error } = await sb.from('recipes').delete().eq('id', id).eq('user_id', USER_ID);
+    if (error) throw error;
+    await loadRecipes();
+    showToast('🗑️ 削除しました');
+  } catch(e) {
+    showToast('⚠️ 削除に失敗しました');
+  }
+  showLoading(false);
 }
 
 // ========== URL IMPORT ==========
@@ -746,7 +834,7 @@ JSON形式（これのみ、説明不要）:
 
 // Override saveRecipe to include pendingToronto
 const _origSave = saveRecipe;
-function saveRecipe() {
+async function saveRecipe() {
   const name=document.getElementById('f-name').value.trim();
   const ingredients=document.getElementById('f-ingredients').value.trim();
   if (!name||!ingredients) { showToast('⚠️ レシピ名と材料は必須です'); return; }
@@ -760,18 +848,26 @@ function saveRecipe() {
     steps:document.getElementById('f-steps').value.trim(),
     note:document.getElementById('f-note').value.trim(),
     tags:currentTags,
-    createdAt:new Date().toLocaleDateString('ja-JP')
   };
   window._pendingToronto=null;
-  if (editingId) {
-    const idx=recipes.findIndex(r=>r.id===editingId);
-    if (idx!==-1) recipes[idx]={...recipes[idx],...data};
-    showToast('✅ 更新しました！');
-  } else {
-    recipes.unshift({id:Date.now(),...data});
-    showToast('✅ レシピを追加しました！');
+  showLoading(true);
+  try {
+    if (editingId) {
+      const { error } = await sb.from('recipes').update(toSupabase(data)).eq('id', editingId).eq('user_id', USER_ID);
+      if (error) throw error;
+      showToast('✅ 更新しました！');
+    } else {
+      const { error } = await sb.from('recipes').insert(toSupabase(data));
+      if (error) throw error;
+      showToast('✅ レシピを追加しました！');
+    }
+    await loadRecipes();
+  } catch(e) {
+    console.error(e);
+    showToast('⚠️ 保存に失敗しました: ' + e.message);
   }
-  save(); closeModal(); renderAll();
+  showLoading(false);
+  closeModal();
 }
 
 function showUrlStatus(type,msg) {
@@ -944,6 +1040,11 @@ window.addEventListener('load', () => {
 
 </script>
 
+
+<div id="loadingOverlay">
+  <div class="loading-spinner"></div>
+  <div class="loading-text">読み込み中...</div>
+</div>
 <!-- PWA INSTALL BANNER -->
 <div class="install-banner" id="installBanner">
   <div class="install-icon">🍳</div>
