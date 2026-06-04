@@ -362,12 +362,31 @@ const SUPABASE_URL = 'https://eiihdccxzksnlqhtdwha.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVpaWhkY2N4emtzbmxxaHRkd2hhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0NDMxMDcsImV4cCI6MjA5NjAxOTEwN30.zPsrxrr8riBHrcEG41hI5ur-yFOJi0Axg4bya41Z3Zs';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// デバイスID（ユーザー識別用・ログイン不要）
-const USER_ID = localStorage.getItem('userId') || (() => {
-  const id = 'user_' + Math.random().toString(36).slice(2);
-  localStorage.setItem('userId', id);
+// ユーザー識別。匿名サインイン（Supabase Anonymous Auth）が有効なら
+// 本物の auth.uid() を使い、RLS で他人のデータを守れる。
+// 無効/失敗時は従来の localStorage ランダムID にフォールバック（互換のため）。
+let USER_ID = null;
+
+async function initAuth() {
+  try {
+    let { data: { session } } = await sb.auth.getSession();
+    if (!session) {
+      const { data, error } = await sb.auth.signInAnonymously();
+      if (error) throw error;
+      session = data.session;
+    }
+    if (session && session.user && session.user.id) return session.user.id;
+  } catch (e) {
+    console.warn('匿名認証が無効/失敗。ローカルIDにフォールバックします:', e && e.message);
+  }
+  // フォールバック（RLS導入前の互換用・端末ローカルのみ）
+  let id = localStorage.getItem('userId');
+  if (!id) {
+    id = 'user_' + Math.random().toString(36).slice(2);
+    localStorage.setItem('userId', id);
+  }
   return id;
-})();
+}
 
 // ========== STATE ==========
 let recipes = [];
@@ -380,6 +399,23 @@ let activeCategory = 'すべて';
 let currentPhotoData = '';
 
 const EMOJIS = ['🍰','🥞','🍮','🍩','🍪','🎂','🍜','🍝','🍣','🍱','🥗','🍲','🫕','🥘','🍛','🍕','🥙','🍔','🧆','🥧','🍡','🧁','🫙','🥮','🫐','🍓','🍇','🥑','🥦','🍋'];
+
+// ========== ESCAPING HELPERS ==========
+// HTML escape for text inserted via innerHTML
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+// Escape a string used as a JS string literal inside an inline (double-quoted) handler attribute
+function escJs(s) {
+  return String(s == null ? '' : s)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '\\x3C')
+    .replace(/\r?\n/g, '\\n');
+}
 
 // ========== SUPABASE CRUD ==========
 function toSupabase(data) {
@@ -458,7 +494,8 @@ async function insertSample() {
 }
 
 function showLoading(on) {
-  document.getElementById('loadingOverlay').style.display = on ? 'flex' : 'none';
+  const el = document.getElementById('loadingOverlay');
+  if (el) el.style.display = on ? 'flex' : 'none';
 }
 
 // localStorageは使わない（Supabaseがマスター）
@@ -470,7 +507,7 @@ function renderAll() { renderCategories(); renderRecipes(); renderShopping(); }
 function renderCategories() {
   const cats = ['すべて', ...new Set(recipes.map(r => r.category))];
   document.getElementById('catFilter').innerHTML = cats.map(c =>
-    `<button class="cat-chip ${c===activeCategory?'active':''}" onclick="setCategory('${c}')">${c}</button>`
+    `<button class="cat-chip ${c===activeCategory?'active':''}" onclick="setCategory('${escJs(c)}')">${esc(c)}</button>`
   ).join('');
 }
 function setCategory(c) { activeCategory=c; renderAll(); }
@@ -493,38 +530,38 @@ function renderRecipes() {
   }
   grid.innerHTML = filtered.map((r,i) => {
     const photoHtml = r.photo
-      ? `<img class="card-photo" src="${r.photo}" alt="${r.name}" onerror="this.style.display='none'">`
-      : `<div class="card-photo-placeholder">${r.emoji||'🍳'}</div>`;
+      ? `<img class="card-photo" src="${esc(r.photo)}" alt="${esc(r.name)}" onerror="this.style.display='none'">`
+      : `<div class="card-photo-placeholder">${esc(r.emoji||'🍳')}</div>`;
     const torontoPreview = (r.torontoIngredients||[]).slice(0,2).map(t =>
       `<div class="toronto-item">
         <div class="toronto-item-info">
-          <div class="toronto-item-en">🍁 ${t.en}</div>
-          <div class="toronto-item-store">${t.store}</div>
+          <div class="toronto-item-en">🍁 ${esc(t.en)}</div>
+          <div class="toronto-item-store">${esc(t.store)}</div>
         </div>
       </div>`
     ).join('');
     return `
     <div class="recipe-card" style="animation-delay:${i*0.05}s">
-      <div onclick="openDetail(${r.id})">${photoHtml}</div>
+      <div onclick="openDetail(${JSON.stringify(r.id)})">${photoHtml}</div>
       <div class="card-body">
         <div class="card-header-row">
-          <div class="card-emoji">${r.emoji||'🍳'}</div>
-          <div class="card-info" onclick="openDetail(${r.id})" style="cursor:pointer">
-            <div class="card-title">${r.name}</div>
-            <div class="card-meta">${r.category}${r.time?' · '+r.time:''}${r.createdAt?' · '+r.createdAt:''}</div>
+          <div class="card-emoji">${esc(r.emoji||'🍳')}</div>
+          <div class="card-info" onclick="openDetail(${JSON.stringify(r.id)})" style="cursor:pointer">
+            <div class="card-title">${esc(r.name)}</div>
+            <div class="card-meta">${esc(r.category)}${r.time?' · '+esc(r.time):''}${r.createdAt?' · '+esc(r.createdAt):''}</div>
           </div>
           <div class="card-actions">
-            <button class="icon-btn btn-cart" title="買い物リストに追加" onclick="addToShopping(${r.id})">🛒</button>
-            <button class="icon-btn btn-edit" title="編集" onclick="openEditModal(${r.id})">✏️</button>
-            <button class="icon-btn btn-delete" title="削除" onclick="deleteRecipe(${r.id})">🗑️</button>
+            <button class="icon-btn btn-cart" title="買い物リストに追加" onclick="addToShopping(${JSON.stringify(r.id)})">🛒</button>
+            <button class="icon-btn btn-edit" title="編集" onclick="openEditModal(${JSON.stringify(r.id)})">✏️</button>
+            <button class="icon-btn btn-delete" title="削除" onclick="deleteRecipe(${JSON.stringify(r.id)})">🗑️</button>
           </div>
         </div>
-        ${(r.tags||[]).length ? `<div class="card-tags">${r.tags.map(t=>`<span class="tag" onclick="searchTag('${t}')">#${t}</span>`).join('')}</div>` : ''}
+        ${(r.tags||[]).length ? `<div class="card-tags">${r.tags.map(t=>`<span class="tag" onclick="searchTag('${escJs(t)}')">#${esc(t)}</span>`).join('')}</div>` : ''}
         ${(r.torontoIngredients||[]).length ? `
           <div class="toronto-section">
             <div class="toronto-label">🍁 トロントで買える材料</div>
             <div class="toronto-items">${torontoPreview}</div>
-            ${(r.torontoIngredients||[]).length>2?`<button class="toronto-toggle" onclick="openDetail(${r.id})">すべて見る（${r.torontoIngredients.length}品目）→</button>`:''}
+            ${(r.torontoIngredients||[]).length>2?`<button class="toronto-toggle" onclick="openDetail(${JSON.stringify(r.id)})">すべて見る（${r.torontoIngredients.length}品目）→</button>`:''}
           </div>` : ''}
       </div>
     </div>`;
@@ -538,32 +575,32 @@ function openDetail(id) {
   const r = recipes.find(x=>x.id===id);
   if (!r) return;
   const photoHtml = r.photo
-    ? `<img class="detail-photo" src="${r.photo}" alt="${r.name}" onerror="this.parentNode.innerHTML='<div class=detail-photo-placeholder>${r.emoji||'🍳'}</div>'">`
-    : `<div class="detail-photo-placeholder">${r.emoji||'🍳'}</div>`;
+    ? `<img class="detail-photo" src="${esc(r.photo)}" alt="${esc(r.name)}" onerror="this.outerHTML='<div class=\\'detail-photo-placeholder\\'>${esc(r.emoji||'🍳')}</div>'">`
+    : `<div class="detail-photo-placeholder">${esc(r.emoji||'🍳')}</div>`;
   const steps = (r.steps||'').split('\n').filter(Boolean);
   const torontoRows = (r.torontoIngredients||[]).map(t => `
     <div class="detail-ingredient-row">
       <div style="flex:1">
-        <div class="detail-ing-jp">${t.jp}</div>
-        <div class="detail-ing-en">🍁 ${t.en}</div>
-        <div class="detail-ing-store">📍 ${t.store}</div>
+        <div class="detail-ing-jp">${esc(t.jp)}</div>
+        <div class="detail-ing-en">🍁 ${esc(t.en)}</div>
+        <div class="detail-ing-store">📍 ${esc(t.store)}</div>
       </div>
     </div>`).join('');
   const ingList = (r.ingredients||'').split('\n').filter(Boolean);
-  const ingRows = ingList.map(line => `<div class="detail-ingredient-row"><div class="detail-ing-jp">・${line}</div></div>`).join('');
+  const ingRows = ingList.map(line => `<div class="detail-ingredient-row"><div class="detail-ing-jp">・${esc(line)}</div></div>`).join('');
 
   document.getElementById('detailContent').innerHTML = `
     <div class="modal-handle"></div>
     ${photoHtml}
     <div style="padding:16px 20px 32px">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
-        <span style="font-size:2rem">${r.emoji||'🍳'}</span>
+        <span style="font-size:2rem">${esc(r.emoji||'🍳')}</span>
         <div>
-          <div style="font-family:'Shippori Mincho',serif;font-size:1.3rem;font-weight:700;color:var(--brown)">${r.name}</div>
-          <div style="font-size:0.72rem;color:var(--gray)">${r.category}${r.time?' · '+r.time:''}${r.createdAt?' · '+r.createdAt:''}</div>
+          <div style="font-family:'Shippori Mincho',serif;font-size:1.3rem;font-weight:700;color:var(--brown)">${esc(r.name)}</div>
+          <div style="font-size:0.72rem;color:var(--gray)">${esc(r.category)}${r.time?' · '+esc(r.time):''}${r.createdAt?' · '+esc(r.createdAt):''}</div>
         </div>
       </div>
-      ${(r.tags||[]).length?`<div class="card-tags" style="margin-bottom:12px">${r.tags.map(t=>`<span class="tag">#${t}</span>`).join('')}</div>`:''}
+      ${(r.tags||[]).length?`<div class="card-tags" style="margin-bottom:12px">${r.tags.map(t=>`<span class="tag">#${esc(t)}</span>`).join('')}</div>`:''}
       <div class="section-divider"></div>
       ${torontoRows ? `
         <div class="detail-section">
@@ -586,14 +623,14 @@ function openDetail(id) {
           <div class="detail-steps">${steps.map((s,i)=>`
             <div class="detail-step">
               <div class="step-num">${i+1}</div>
-              <div class="step-text">${s.replace(/^\d+[\.\．]\s*/,'')}</div>
+              <div class="step-text">${esc(s.replace(/^\d+[\.\．]\s*/,''))}</div>
             </div>`).join('')}
           </div>
         </div>` : ''}
       ${r.note ? `
         <div class="section-divider"></div>
         <div style="background:var(--cream);border-radius:10px;padding:12px;font-size:0.82rem;line-height:1.6">
-          💡 ${r.note}
+          💡 ${esc(r.note)}
         </div>` : ''}
       <button class="cancel-btn" style="margin-top:16px" onclick="closeDetailModal()">閉じる</button>
     </div>`;
@@ -621,18 +658,18 @@ function renderShopping() {
     return;
   }
   el.innerHTML = shoppingRecipes.map(r => {
-    const items = r.ingredients.split('\n').filter(Boolean);
+    const items = (r.ingredients||'').split('\n').filter(Boolean);
     return `<div class="shopping-recipe-group">
       <div class="shopping-recipe-name">
-        ${r.emoji} ${r.name}
-        <button style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:0.8rem" onclick="removeFromShopping(${r.id})">✕ 削除</button>
+        ${esc(r.emoji||'🍳')} ${esc(r.name)}
+        <button style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:0.8rem" onclick="removeFromShopping(${JSON.stringify(r.id)})">✕ 削除</button>
       </div>
       ${items.map((item,i)=>{
         const key=`${r.id}-${i}`;
         const checked=shoppingChecked[key];
-        return `<div class="shopping-item ${checked?'done':''}" onclick="toggleCheck('${key}',this)">
+        return `<div class="shopping-item ${checked?'done':''}" onclick="toggleCheck('${escJs(key)}',this)">
           <div class="shopping-check ${checked?'checked':''}">✓</div>
-          <div class="item-text">${item}</div>
+          <div class="item-text">${esc(item)}</div>
         </div>`;
       }).join('')}
     </div>`;
@@ -690,12 +727,13 @@ function resetPhotoPreview() {
 
 // ========== MODAL ==========
 function openAddModal() {
-  editingId=null; currentTags=[]; selectedEmoji='🍳'; currentPhotoData='';
+  editingId=null; currentTags=[]; selectedEmoji='🍳'; currentPhotoData=''; window._pendingToronto=null;
   document.getElementById('modalTitle').textContent='🍳 レシピを追加';
   document.getElementById('urlImportBox').style.display='';
   document.getElementById('f-url').value='';
   document.getElementById('urlStatus').className='url-status';
   document.getElementById('f-name').value='';
+  document.getElementById('f-category').value='スイーツ';
   document.getElementById('f-time').value='';
   document.getElementById('f-ingredients').value='';
   document.getElementById('f-steps').value='';
@@ -708,7 +746,7 @@ function openAddModal() {
 function openEditModal(id) {
   const r = recipes.find(x=>x.id===id);
   if (!r) return;
-  editingId=id; currentTags=[...(r.tags||[])]; selectedEmoji=r.emoji||'🍳'; currentPhotoData=r.photo||'';
+  editingId=id; currentTags=[...(r.tags||[])]; selectedEmoji=r.emoji||'🍳'; currentPhotoData=r.photo||''; window._pendingToronto=null;
   document.getElementById('modalTitle').textContent='✏️ レシピを編集';
   document.getElementById('urlImportBox').style.display='none';
   document.getElementById('f-name').value=r.name;
@@ -719,7 +757,7 @@ function openEditModal(id) {
   document.getElementById('f-note').value=r.note||'';
   document.getElementById('aiResult').classList.remove('show');
   resetPhotoPreview();
-  if (r.photo) { document.getElementById('f-photoUrl').value=r.photo.startsWith('data:')?'':r.photo; showPhotoPreview(r.photo); }
+  if (r.photo) { document.getElementById('f-photoUrl').value=r.photo.startsWith('data:')?'':r.photo; currentPhotoData=r.photo; showPhotoPreview(r.photo); }
   renderEmojiRow(); renderTagList();
   document.getElementById('modal').classList.add('open');
 }
@@ -728,7 +766,7 @@ document.getElementById('modal').addEventListener('click', function(e){ if(e.tar
 
 function renderEmojiRow() {
   document.getElementById('emojiRow').innerHTML = EMOJIS.map(e =>
-    `<button class="emoji-btn ${e===selectedEmoji?'selected':''}" onclick="selectEmoji('${e}')">${e}</button>`
+    `<button class="emoji-btn ${e===selectedEmoji?'selected':''}" onclick="selectEmoji('${escJs(e)}')">${esc(e)}</button>`
   ).join('');
 }
 function selectEmoji(e) { selectedEmoji=e; renderEmojiRow(); }
@@ -741,35 +779,10 @@ function addTag() {
 function removeTag(tag) { currentTags=currentTags.filter(t=>t!==tag); renderTagList(); }
 function renderTagList() {
   document.getElementById('f-tags').innerHTML=currentTags.map(t=>
-    `<div class="tag-removable">#${t}<button onclick="removeTag('${t}')">×</button></div>`
+    `<div class="tag-removable">#${esc(t)}<button onclick="removeTag('${escJs(t)}')">×</button></div>`
   ).join('');
 }
 
-function saveRecipe() {
-  const name=document.getElementById('f-name').value.trim();
-  const ingredients=document.getElementById('f-ingredients').value.trim();
-  if (!name||!ingredients) { showToast('⚠️ レシピ名と材料は必須です'); return; }
-  const data = {
-    emoji:selectedEmoji, name,
-    category:document.getElementById('f-category').value,
-    time:document.getElementById('f-time').value.trim(),
-    photo:currentPhotoData,
-    ingredients,
-    steps:document.getElementById('f-steps').value.trim(),
-    note:document.getElementById('f-note').value.trim(),
-    tags:currentTags,
-    createdAt:new Date().toLocaleDateString('ja-JP')
-  };
-  if (editingId) {
-    const idx=recipes.findIndex(r=>r.id===editingId);
-    if (idx!==-1) recipes[idx]={...recipes[idx],...data};
-    showToast('✅ 更新しました！');
-  } else {
-    recipes.unshift({id:Date.now(),...data});
-    showToast('✅ レシピを追加しました！');
-  }
-  save(); closeModal(); renderAll();
-}
 async function deleteRecipe(id) {
   if (!confirm('このレシピを削除しますか？')) return;
   showLoading(true);
@@ -779,82 +792,10 @@ async function deleteRecipe(id) {
     await loadRecipes();
     showToast('🗑️ 削除しました');
   } catch(e) {
+    console.error(e);
     showToast('⚠️ 削除に失敗しました');
   }
   showLoading(false);
-}
-
-// ========== IMPORT MODE ==========
-function switchImportMode(mode) {
-  document.getElementById('importModeUrl').style.display = mode==='url' ? '' : 'none';
-  document.getElementById('importModePaste').style.display = mode==='paste' ? '' : 'none';
-  document.getElementById('modeUrl').classList.toggle('active', mode==='url');
-  document.getElementById('modePaste').classList.toggle('active', mode==='paste');
-  document.getElementById('urlStatus').className = 'url-status';
-}
-
-async function importFromPaste() {
-  const text = document.getElementById('f-pasteText').value.trim();
-  if (!text || text.length < 30) { showUrlStatus('error','⚠️ テキストが短すぎます。レシピのテキストをもっと貼り付けてください'); return; }
-  const btn = document.getElementById('pasteFetchBtn');
-  btn.disabled=true; btn.textContent='解析中...';
-  showUrlStatus('','⏳ AIがレシピを解析中...');
-
-  const prompt = `以下のテキストはレシピページからコピーしたものです。レシピ情報を抽出してJSON形式のみで返してください。説明文不要。
-
-テキスト:
-${text.slice(0, 4000)}
-
-返すJSONの形式:
-{
-  "name": "レシピ名",
-  "category": "スイーツ/パン・生地/和食/洋食/中華/麺類/その他",
-  "time": "調理時間",
-  "ingredients": "材料1 分量1\n材料2 分量2",
-  "torontoIngredients": [
-    {"jp": "材料名（日本語）", "en": "Toronto store product name & brand", "store": "No Frills/Sobeys etc. + コーナー名"}
-  ],
-  "steps": "1. 手順\n2. 手順",
-  "note": "ポイント",
-  "tags": ["タグ1","タグ2"],
-  "emoji": "絵文字1文字",
-  "photoUrl": ""
-}`;
-
-  try {
-    const res = await fetch('https://eiihdccxzksnlqhtdwha.supabase.co/functions/v1/ai-proxy', {
-      method:'POST',
-      headers:{'Content-Type':'application/json', 'Authorization':'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVpaWhkY2N4emtzbmxxaHRkd2hhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0NDMxMDcsImV4cCI6MjA5NjAxOTEwN30.zPsrxrr8riBHrcEG41hI5ur-yFOJi0Axg4bya41Z3Zs'},
-      body:JSON.stringify({
-        model:'claude-sonnet-4-20250514',
-        max_tokens:2500,
-        messages:[{role:'user', content:prompt}]
-      })
-    });
-    if (!res.ok) throw new Error('API Error: ' + res.status);
-    const data = await res.json();
-    const fullText = (data.content||[]).filter(c=>c.type==='text').map(c=>c.text).join('');
-    const m = fullText.match(/\{[\s\S]*\}/);
-    if (!m) throw new Error('JSONが見つかりません');
-    const recipe = JSON.parse(m[0]);
-    if (!recipe.name) throw new Error('レシピ名が取得できませんでした');
-
-    if (recipe.name) document.getElementById('f-name').value=recipe.name;
-    if (recipe.category) document.getElementById('f-category').value=recipe.category;
-    if (recipe.time) document.getElementById('f-time').value=recipe.time;
-    if (recipe.ingredients) document.getElementById('f-ingredients').value=recipe.ingredients;
-    if (recipe.steps) document.getElementById('f-steps').value=recipe.steps;
-    if (recipe.note) document.getElementById('f-note').value=recipe.note;
-    if (recipe.tags) { currentTags=recipe.tags; renderTagList(); }
-    if (recipe.emoji) { selectedEmoji=recipe.emoji; renderEmojiRow(); }
-    window._pendingToronto = recipe.torontoIngredients || [];
-    document.getElementById('f-pasteText').value='';
-    showUrlStatus('success','✅ レシピを読み取りました！内容を確認して保存してね');
-  } catch(e) {
-    console.error(e);
-    showUrlStatus('error','⚠️ 解析に失敗しました: ' + e.message.slice(0,60));
-  }
-  btn.disabled=false; btn.textContent='AIで解析する';
 }
 
 // ========== URL IMPORT ==========
@@ -866,7 +807,7 @@ async function callAIWithRetry(messages, tools, maxRetries=3) {
     if (tools) body.tools = tools;
     const res = await fetch('https://eiihdccxzksnlqhtdwha.supabase.co/functions/v1/ai-proxy', {
       method:'POST',
-      headers:{'Content-Type':'application/json', 'Authorization':'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVpaWhkY2N4emtzbmxxaHRkd2hhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0NDMxMDcsImV4cCI6MjA5NjAxOTEwN30.zPsrxrr8riBHrcEG41hI5ur-yFOJi0Axg4bya41Z3Zs'},
+      headers:{'Content-Type':'application/json', 'Authorization':'Bearer ' + SUPABASE_KEY},
       body:JSON.stringify(body)
     });
     if (!res.ok) {
@@ -959,19 +900,18 @@ URL: ${url}
   btn.disabled=false; btn.textContent='読み取る';
 }
 
-// Override saveRecipe to include pendingToronto
-const _origSave = saveRecipe;
 async function saveRecipe() {
   const name=document.getElementById('f-name').value.trim();
   const ingredients=document.getElementById('f-ingredients').value.trim();
   if (!name||!ingredients) { showToast('⚠️ レシピ名と材料は必須です'); return; }
+  const existingToronto = editingId ? ((recipes.find(r=>r.id===editingId)||{}).torontoIngredients || []) : [];
   const data={
     emoji:selectedEmoji, name,
     category:document.getElementById('f-category').value,
     time:document.getElementById('f-time').value.trim(),
     photo:currentPhotoData,
     ingredients,
-    torontoIngredients: window._pendingToronto || (editingId ? (recipes.find(r=>r.id===editingId)||{}).torontoIngredients : []) || [],
+    torontoIngredients: window._pendingToronto || existingToronto,
     steps:document.getElementById('f-steps').value.trim(),
     note:document.getElementById('f-note').value.trim(),
     tags:currentTags,
@@ -988,13 +928,13 @@ async function saveRecipe() {
       if (error) throw error;
       showToast('✅ レシピを追加しました！');
     }
+    closeModal();
     await loadRecipes();
   } catch(e) {
     console.error(e);
     showToast('⚠️ 保存に失敗しました: ' + e.message);
   }
   showLoading(false);
-  closeModal();
 }
 
 function showUrlStatus(type,msg) {
@@ -1012,7 +952,7 @@ async function generateShoppingAI() {
   spinner.classList.add('show'); result.classList.remove('show');
   try {
     const response=await fetch('https://eiihdccxzksnlqhtdwha.supabase.co/functions/v1/ai-proxy',{
-      method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVpaWhkY2N4emtzbmxxaHRkd2hhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0NDMxMDcsImV4cCI6MjA5NjAxOTEwN30.zPsrxrr8riBHrcEG41hI5ur-yFOJi0Axg4bya41Z3Zs'},
+      method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer ' + SUPABASE_KEY},
       body:JSON.stringify({
         model:'claude-sonnet-4-20250514', max_tokens:1000,
         messages:[{role:'user',content:`以下の材料をトロントのNo Frills・Sobeys・Walmartで買える商品名・ブランドに変換して日本語で箇条書きにしてください。乳製品はLactantia Lactose Free優先。
@@ -1024,10 +964,12 @@ ${ingredients}
 ・材料名 → 商品名（ブランド）/ 売り場`}]
       })
     });
+    if (!response.ok) throw new Error('API ' + response.status);
     const data=await response.json();
     result.textContent=(data.content||[]).map(c=>c.text||'').join('')||'エラーが発生しました';
     result.classList.add('show');
   } catch(e) {
+    console.error(e);
     result.textContent='⚠️ AI生成に失敗しました。';
     result.classList.add('show');
   }
@@ -1047,7 +989,17 @@ function showToast(msg) {
   setTimeout(()=>t.classList.remove('show'),2500);
 }
 
-renderAll();
+// 初期化：認証（匿名サインイン or フォールバック）→ レシピ読み込み
+// DOM構築後に実行（loadingOverlay 等はこのスクリプトより後ろにあるため）
+async function boot() {
+  USER_ID = await initAuth();
+  await loadRecipes();
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', boot);
+} else {
+  boot();
+}
 
 // ========== PWA ==========
 // Manifest をJS経由でインライン生成（ファイル不要）
@@ -1074,19 +1026,30 @@ const manifest = {
 };
 const manifestBlob = new Blob([JSON.stringify(manifest)], {type:'application/json'});
 const manifestUrl  = URL.createObjectURL(manifestBlob);
-document.querySelector('link[rel="manifest"]') && (document.querySelector('link[rel="manifest"]').href = manifestUrl);
+let manifestLink = document.querySelector('link[rel="manifest"]');
+if (!manifestLink) {
+  manifestLink = document.createElement('link');
+  manifestLink.rel = 'manifest';
+  document.head.appendChild(manifestLink);
+}
+manifestLink.href = manifestUrl;
 
 // Apple touch icon
-const appleLink = document.querySelector('link[rel="apple-touch-icon"]');
-if (appleLink) appleLink.href = iconUrl;
+let appleLink = document.querySelector('link[rel="apple-touch-icon"]');
+if (!appleLink) {
+  appleLink = document.createElement('link');
+  appleLink.rel = 'apple-touch-icon';
+  document.head.appendChild(appleLink);
+}
+appleLink.href = iconUrl;
 
 // Service Worker（キャッシュ戦略）
-if ('serviceWorker' in navigator) {
+// blob: URL から登録した Service Worker は scope を持てないため、
+// file:// やローカルプレビューでは失敗することがある。失敗は握りつぶす。
+if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   const swCode = `
 const CACHE = 'recipe-book-v1';
-const ASSETS = [location.href];
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll([])));
   self.skipWaiting();
 });
 self.addEventListener('activate', e => {
